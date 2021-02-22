@@ -1,25 +1,121 @@
-/*
- * A javascript-based implementation of Spatial Navigation.
+interface Configuration {
+    /**
+     * Elements matching selector are regarded as navigable elements in SpatialNavigation.
+     * However, hidden or disabled elements are ignored as they can not be focused in any way.
+     */
+    selector: Selector,
+
+    /**
+     * When it is true, only elements in the straight (vertical or horizontal) direction will be navigated.
+     * i.e. SpatialNavigation ignores elements in the oblique directions.
+     */
+    straightOnly: boolean,
+
+    /**
+     * This threshold is used to determine whether an element is considered in the straight (vertical or horizontal) directions.
+     * Valid number is between 0 to 1.0.
+     * Setting it to 0.3 means that an element is counted in the straight directions only if it overlaps the straight area at least 0.3x of its total area.
+     *
+     * NB: - Number in the range [0, 1]
+     */
+    straightOverlapThreshold: Number,
+
+    /**
+     * When it is true, the previously focused element will have higher priority to be chosen as the next candidate.
+     */
+    rememberSource: boolean,
+
+    /**
+     * When it is true, elements defined in this section are unnavigable. This property is modified by disable() and enable() as well.
+     */
+    disabled: boolean,
+
+    /**
+     * When a section is specified to be the next focused target, e.g. focus('some-section-id') is called, the first element matching defaultElement within this section will be chosen first.
+     * NB: Selector (without @)
+     */
+    defaultElement: Selector,
+
+    /**
+     * If the focus comes from another section, you can define which element in this section should be focused first.
+     * - 'last-focused': indicates the last focused element before we left this section last time.
+     *    If this section has never been focused yet, the default element (if any) will be chosen next.
+     * - 'default-element': indicates the element defined in defaultElement.
+     * - '': implies following the original rule without any change.
+     */
+    enterTo: EnterTo,
+
+    /**
+     * This property specifies which element should be focused next when a user presses the corresponding arrow key and intends to leave the current section.
+     * It should be a PlainObject consists of four properties: 'left', 'right', 'up' and 'down'.
+     * Each property should be a Selector.
+     * Any of these properties can be omitted, and SpatialNavigation will follow the original rule to navigate.
+     *
+     * Note: Assigning an empty string to any of these properties makes SpatialNavigation go nowhere at that direction.
+     */
+    leaveFor?: LeaveForType,
+
+    /**
+     * - 'self-first' implies that elements within the same section will have higher priority to be chosen as the next candidate.
+     * - 'self-only' implies that elements in the other sections will never be navigated by arrow keys. (However, you can always focus them by calling focus() manually.)
+     * - 'none' implies no restriction.
+     */
+    restrict: RestrictType,
+
+    /**
+     * Elements matching tabIndexIgnoreList will never be affected by makeFocusable().
+     * It is usually used to ignore elements that are already focusable.
+     */
+    tabIndexIgnoreList: String,
+
+    /**
+     * A callback function that accepts a DOM element as the first argument.
+     *
+     * SpatialNavigation calls this function every time when it tries to traverse every single candidate.
+     * You can ignore arbitrary elements by returning false.
+     */
+    navigableFilter?: ((htmlElement: HTMLElement, sectionId: String) => boolean)
+}
+
+type EnterTo = '' | 'last-focused' | 'default-element';
+
+enum RestrictType {
+    selfFirst = 'self-first',
+    selfOnly = 'self-only',
+    none = 'none'
+};
+
+enum FiredEvents {
+    willUnFocus ='willunfocus',
+    unFocused = 'unfocused',
+    willFocus = 'willfocus',
+    focused = 'focused',
+    navigateFailed ='navigatefailed',
+    enterDown = 'enter-down',
+    enterUp = 'enter-up',
+    willMove = 'willmove'
+}
+
+interface LeaveForType {
+    up?: Selector;
+    down?: Selector;
+    right?: Selector;
+    left?: Selector;
+}
+
+/**
+ * String Type:
+ * - a valid selector string for "querySelectorAll"
+ * - '@sectionId' to indicate the specified section (e.g. '@test-section' indicates the section whose id is test-section.
+ * - '@' to indicate the default section
  *
- * Copyright (c) 2017 Luke Chang.
- * https://github.com/luke-chang/js-spatial-navigation
- *
- * Licensed under the MPL 2.0.
+ * Note: Certain methods do not accept the @ syntax (including both @ and @<sectionId>)
  */
-;
+type Selector = String | NodeList | Element | Element[]
+
 (function ($) {
     'use strict';
-    /************************/
-    /* Global Configuration */
-    /************************/
-    // Note: an <extSelector> can be one of following types:
-    // - a valid selector string for "querySelectorAll" or jQuery (if it exists)
-    // - a NodeList or an array containing DOM elements
-    // - a single DOM element
-    // - a jQuery object
-    // - a string "@<sectionId>" to indicate the specified section
-    // - a string "@" to indicate the default section
-    var GlobalConfig = {
+    const GlobalConfig: Configuration = {
         selector: '',
         straightOnly: false,
         straightOverlapThreshold: 0.5,
@@ -29,9 +125,9 @@
         enterTo: '',
         leaveFor: null,
         //  up: <extSelector>, down: <extSelector>}
-        restrict: 'self-first',
+        restrict: RestrictType.selfFirst,
         tabIndexIgnoreList: 'a, input, select, textarea, button, iframe, [contentEditable=true]',
-        navigableFilter: null
+        navigableFilter: null,
     };
     /*********************/
     /* Constant Variable */
@@ -48,8 +144,8 @@
         'right': 'left',
         'down': 'up'
     };
-    var EVENT_PREFIX = 'sn:';
-    var ID_POOL_PREFIX = 'section-';
+    const EVENT_PREFIX = 'sn:';
+    const ID_POOL_PREFIX = 'section-';
     /********************/
     /* Private Variable */
     /********************/
@@ -64,18 +160,16 @@
     /************/
     /* Polyfill */
     /************/
-    var elementMatchesSelector = Element.prototype.matches ||
+    const elementMatchesSelector = Element.prototype.matches ||
         (Element.prototype as any).matchesSelector ||
         (Element.prototype as any).mozMatchesSelector ||
         Element.prototype.webkitMatchesSelector ||
         (Element.prototype as any).msMatchesSelector ||
         (Element.prototype as any).oMatchesSelector ||
-        // @ts-expect-error ts-migrate(2300) FIXME: Duplicate identifier 'this'.
-        function (this: any, this: any, this: any, selector) {
-            var matchedNodes = (this.parentNode || this.document).querySelectorAll(selector);
-            // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+        ((selector: Selector) => {
+            const matchedNodes = (this.parentNode || this.document).querySelectorAll(selector);
             return [].slice.call(matchedNodes).indexOf(this) >= 0;
-        };
+        });
     /*****************/
     /* Core Function */
     /*****************/
@@ -123,47 +217,45 @@
                 y = 2;
             }
             groupId = y * 3 + x;
-            // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
             groups[groupId].push(rect);
             if ([0, 2, 6, 8].indexOf(groupId) !== -1) {
                 var threshold = straightOverlapThreshold;
                 if (rect.left <= targetRect.right - targetRect.width * threshold) {
                     if (groupId === 2) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
                         groups[1].push(rect);
                     }
                     else if (groupId === 8) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[7].push(rect);
                     }
                 }
                 if (rect.right >= targetRect.left + targetRect.width * threshold) {
                     if (groupId === 0) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[1].push(rect);
                     }
                     else if (groupId === 6) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[7].push(rect);
                     }
                 }
                 if (rect.top <= targetRect.bottom - targetRect.height * threshold) {
                     if (groupId === 6) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[3].push(rect);
                     }
                     else if (groupId === 8) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[5].push(rect);
                     }
                 }
                 if (rect.bottom >= targetRect.top + targetRect.height * threshold) {
                     if (groupId === 0) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[3].push(rect);
                     }
                     else if (groupId === 2) {
-                        // @ts-expect-error ts-migrate(2345) FIXME: Argument of type 'any' is not assignable to parame... Remove this comment to see the full error message
+
                         groups[5].push(rect);
                     }
                 }
@@ -416,7 +508,7 @@
         var id;
         while (true) {
             id = ID_POOL_PREFIX + String(++_idPool);
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (!_sections[id]) {
                 break;
             }
@@ -463,16 +555,16 @@
             return activeElement;
         }
     }
-    function extend(out: any) {
+    function extend(out?: Object, ...elements: Object[]) {
         out = out || {};
-        for (var i = 1; i < arguments.length; i++) {
-            if (!arguments[i]) {
+        for (var i = 1; i < elements.length; i++) {
+            if (!elements[i]) {
                 continue;
             }
-            for (var key in arguments[i]) {
-                if (arguments[i].hasOwnProperty(key) &&
-                    arguments[i][key] !== undefined) {
-                    out[key] = arguments[i][key];
+            for (var key in elements[i]) {
+                if (elements[i].hasOwnProperty(key) &&
+                elements[i][key] !== undefined) {
+                    out[key] = elements[i][key];
                 }
             }
         }
@@ -490,9 +582,9 @@
         }
         return elemList;
     }
-    function isNavigable(elem: any, sectionId: any, verifySectionSelector: any) {
+    function isNavigable(elem: any, sectionId: String, verifySectionSelector?: any) {
         if (!elem || !sectionId ||
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             !_sections[sectionId] || _sections[sectionId].disabled) {
             return false;
         }
@@ -501,19 +593,19 @@
             return false;
         }
         if (verifySectionSelector &&
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             !matchSelector(elem, _sections[sectionId].selector)) {
             return false;
         }
-        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
         if (typeof _sections[sectionId].navigableFilter === 'function') {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (_sections[sectionId].navigableFilter(elem, sectionId) === false) {
                 return false;
             }
         }
         else if (typeof GlobalConfig.navigableFilter === 'function') {
-            // @ts-expect-error ts-migrate(2721) FIXME: Cannot invoke an object which is possibly 'null'.
+
             if (GlobalConfig.navigableFilter(elem, sectionId) === false) {
                 return false;
             }
@@ -522,23 +614,23 @@
     }
     function getSectionId(elem: any) {
         for (var id in _sections) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (!_sections[id].disabled &&
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 matchSelector(elem, _sections[id].selector)) {
                 return id;
             }
         }
     }
     function getSectionNavigableElements(sectionId: any) {
-        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
         return parseSelector(_sections[sectionId].selector).filter(function (elem: any) {
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 3 arguments, but got 2.
+
             return isNavigable(elem, sectionId);
         });
     }
     function getSectionDefaultElement(sectionId: any) {
-        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
         var defaultElement = _sections[sectionId].defaultElement;
         if (!defaultElement) {
             return null;
@@ -555,22 +647,19 @@
         return null;
     }
     function getSectionLastFocusedElement(sectionId: any) {
-        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
         var lastFocusedElement = _sections[sectionId].lastFocusedElement;
         if (!isNavigable(lastFocusedElement, sectionId, true)) {
             return null;
         }
         return lastFocusedElement;
     }
-    function fireEvent(elem: any, type: any, details: any, cancelable: any) {
-        if (arguments.length < 4) {
-            cancelable = true;
-        }
+    function fireEvent(elem: any, type: FiredEvents, details?: any, cancelable: boolean = true) {
         var evt = document.createEvent('CustomEvent');
         evt.initCustomEvent(EVENT_PREFIX + type, true, cancelable, details);
         return elem.dispatchEvent(evt);
     }
-    function focusElement(elem: any, sectionId: any, direction: any) {
+    function focusElement(elem: any, sectionId?: String, direction?: any) {
         if (!elem) {
             return false;
         }
@@ -599,13 +688,13 @@
                 direction: direction,
                 native: false
             };
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 3.
-            if (!fireEvent(currentFocusedElement, 'willunfocus', unfocusProperties)) {
+
+            if (!fireEvent(currentFocusedElement, FiredEvents.willUnFocus, unfocusProperties)) {
                 _duringFocusChange = false;
                 return false;
             }
             (currentFocusedElement as any).blur();
-            fireEvent(currentFocusedElement, 'unfocused', unfocusProperties, false);
+            fireEvent(currentFocusedElement, FiredEvents.unFocused, unfocusProperties, false);
         }
         var focusProperties = {
             previousElement: currentFocusedElement,
@@ -613,23 +702,23 @@
             direction: direction,
             native: false
         };
-        // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 3.
-        if (!fireEvent(elem, 'willfocus', focusProperties)) {
+
+        if (!fireEvent(elem, FiredEvents.willFocus, focusProperties)) {
             _duringFocusChange = false;
             return false;
         }
         elem.focus();
-        fireEvent(elem, 'focused', focusProperties, false);
+        fireEvent(elem, FiredEvents.focused, focusProperties, false);
         _duringFocusChange = false;
         focusChanged(elem, sectionId);
         return true;
     }
-    function focusChanged(elem: any, sectionId: any) {
+    function focusChanged(elem: any, sectionId?: any) {
         if (!sectionId) {
             sectionId = getSectionId(elem);
         }
         if (sectionId) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             _sections[sectionId].lastFocusedElement = elem;
             _lastSectionId = sectionId;
         }
@@ -637,7 +726,7 @@
     function focusExtendedSelector(selector: any, direction: any) {
         if (selector.charAt(0) == '@') {
             if (selector.length == 1) {
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 1 arguments, but got 0.
+
                 return focusSection();
             }
             else {
@@ -649,7 +738,7 @@
             var next = parseSelector(selector)[0];
             if (next) {
                 var nextSectionId = getSectionId(next);
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 3 arguments, but got 2.
+
                 if (isNavigable(next, nextSectionId)) {
                     return focusElement(next, nextSectionId, direction);
                 }
@@ -657,11 +746,11 @@
         }
         return false;
     }
-    function focusSection(sectionId: any) {
+    function focusSection(sectionId?: String) {
         var range: any = [];
         var addRange = function (id: any) {
             if (id && range.indexOf(id) < 0 &&
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 _sections[id] && !_sections[id].disabled) {
                 range.push(id);
             }
@@ -677,7 +766,7 @@
         for (var i = 0; i < range.length; i++) {
             var id = range[i];
             var next;
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (_sections[id].enterTo == 'last-focused') {
                 next = getSectionLastFocusedElement(id) ||
                     getSectionDefaultElement(id) ||
@@ -689,23 +778,23 @@
                     getSectionNavigableElements(id)[0];
             }
             if (next) {
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 3 arguments, but got 2.
+
                 return focusElement(next, id);
             }
         }
         return false;
     }
     function fireNavigatefailed(elem: any, direction: any) {
-        fireEvent(elem, 'navigatefailed', {
+        fireEvent(elem, FiredEvents.navigateFailed, {
             direction: direction
         }, false);
     }
     function gotoLeaveFor(sectionId: any, direction: any) {
-        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
         if (_sections[sectionId].leaveFor &&
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             _sections[sectionId].leaveFor[direction] !== undefined) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             var next = _sections[sectionId].leaveFor[direction];
             if (typeof next === 'string') {
                 if (next === '') {
@@ -717,7 +806,7 @@
                 next = next.get(0);
             }
             var nextSectionId = getSectionId(next);
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 3 arguments, but got 2.
+
             if (isNavigable(next, nextSectionId)) {
                 return focusElement(next, nextSectionId, direction);
             }
@@ -737,20 +826,20 @@
         var sectionNavigableElements = {};
         var allNavigableElements: any = [];
         for (var id in _sections) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             sectionNavigableElements[id] = getSectionNavigableElements(id);
             allNavigableElements =
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 allNavigableElements.concat(sectionNavigableElements[id]);
         }
-        // @ts-expect-error ts-migrate(2554) FIXME: Expected 1 arguments, but got 3.
+
         var config = extend({}, GlobalConfig, _sections[currentSectionId]);
         var next;
-        if (config.restrict == 'self-only' || config.restrict == 'self-first') {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+        if (config.restrict == 'self-only' || config.restrict == RestrictType.selfFirst) {
+
             var currentSectionNavigableElements = sectionNavigableElements[currentSectionId];
             next = navigate(currentFocusedElement, direction, exclude(currentSectionNavigableElements, currentFocusedElement), config);
-            if (!next && config.restrict == 'self-first') {
+            if (!next && config.restrict == RestrictType.selfFirst) {
                 next = navigate(currentFocusedElement, direction, exclude(allNavigableElements, currentSectionNavigableElements), config);
             }
         }
@@ -758,11 +847,11 @@
             next = navigate(currentFocusedElement, direction, exclude(allNavigableElements, currentFocusedElement), config);
         }
         if (next) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             _sections[currentSectionId].previous = {
                 target: currentFocusedElement,
                 destination: next,
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 reverse: REVERSE[direction]
             };
             var nextSectionId = getSectionId(next);
@@ -776,7 +865,7 @@
                     return false;
                 }
                 var enterToElement;
-                // @ts-expect-error ts-migrate(2538) FIXME: Type 'undefined' cannot be used as an index type.
+
                 switch (_sections[nextSectionId].enterTo) {
                     case 'last-focused':
                         enterToElement = getSectionLastFocusedElement(nextSectionId) ||
@@ -809,14 +898,14 @@
             evt.stopPropagation();
             return false;
         };
-        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
         var direction = KEYMAPPING[evt.keyCode];
         if (!direction) {
             if (evt.keyCode == 13) {
                 currentFocusedElement = getCurrentFocusedElement();
                 if (currentFocusedElement && getSectionId(currentFocusedElement)) {
-                    // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 2.
-                    if (!fireEvent(currentFocusedElement, 'enter-down')) {
+
+                    if (!fireEvent(currentFocusedElement, FiredEvents.enterDown)) {
                         return preventDefault();
                     }
                 }
@@ -829,7 +918,7 @@
                 currentFocusedElement = getSectionLastFocusedElement(_lastSectionId);
             }
             if (!currentFocusedElement) {
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 1 arguments, but got 0.
+
                 focusSection();
                 return preventDefault();
             }
@@ -843,8 +932,8 @@
             sectionId: currentSectionId,
             cause: 'keydown'
         };
-        // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 3.
-        if (fireEvent(currentFocusedElement, 'willmove', willmoveProperties)) {
+
+        if (fireEvent(currentFocusedElement, FiredEvents.willMove, willmoveProperties)) {
             focusNext(direction, currentFocusedElement, currentSectionId);
         }
         return preventDefault();
@@ -856,8 +945,8 @@
         if (!_pause && _sectionCount && evt.keyCode == 13) {
             var currentFocusedElement = getCurrentFocusedElement();
             if (currentFocusedElement && getSectionId(currentFocusedElement)) {
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 2.
-                if (!fireEvent(currentFocusedElement, 'enter-up')) {
+
+                if (!fireEvent(currentFocusedElement, FiredEvents.enterUp)) {
                     evt.preventDefault();
                     evt.stopPropagation();
                 }
@@ -878,14 +967,14 @@
                     sectionId: sectionId,
                     native: true
                 };
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 3.
-                if (!fireEvent(target, 'willfocus', focusProperties)) {
+
+                if (!fireEvent(target, FiredEvents.willFocus, focusProperties)) {
                     _duringFocusChange = true;
                     target.blur();
                     _duringFocusChange = false;
                 }
                 else {
-                    fireEvent(target, 'focused', focusProperties, false);
+                    fireEvent(target, FiredEvents.focused, focusProperties, false);
                     focusChanged(target, sectionId);
                 }
             }
@@ -898,8 +987,8 @@
             var unfocusProperties = {
                 native: true
             };
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 3.
-            if (!fireEvent(target, 'willunfocus', unfocusProperties)) {
+
+            if (!fireEvent(target, FiredEvents.willUnFocus, unfocusProperties)) {
                 _duringFocusChange = true;
                 setTimeout(function () {
                     target.focus();
@@ -907,7 +996,7 @@
                 });
             }
             else {
-                fireEvent(target, 'unfocused', unfocusProperties, false);
+                fireEvent(target, FiredEvents.unFocused, unfocusProperties, false);
             }
         }
     }
@@ -951,7 +1040,7 @@
                 typeof arguments[1] === 'object') {
                 sectionId = arguments[0];
                 config = arguments[1];
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 if (!_sections[sectionId]) {
                     throw new Error('Section "' + sectionId + '" doesn\'t exist!');
                 }
@@ -960,21 +1049,21 @@
                 return;
             }
             for (var key in config) {
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 if (GlobalConfig[key] !== undefined) {
                     if (sectionId) {
-                        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                         _sections[sectionId][key] = config[key];
                     }
                     else if (config[key] !== undefined) {
-                        // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                         GlobalConfig[key] = config[key];
                     }
                 }
             }
             if (sectionId) {
                 // remove "undefined" items
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 _sections[sectionId] = extend({}, _sections[sectionId]);
             }
         },
@@ -994,14 +1083,14 @@
             if (!sectionId) {
                 sectionId = (typeof (config as any).id === 'string') ? (config as any).id : generateId();
             }
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (_sections[sectionId]) {
                 throw new Error('Section "' + sectionId + '" has already existed!');
             }
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             _sections[sectionId] = {};
             _sectionCount++;
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 0 arguments, but got 2.
+
             SpatialNavigation.set(sectionId, config);
             return sectionId;
         },
@@ -1009,11 +1098,11 @@
             if (!sectionId || typeof sectionId !== 'string') {
                 throw new Error('Please assign the "sectionId"!');
             }
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (_sections[sectionId]) {
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 _sections[sectionId] = undefined;
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 1 arguments, but got 2.
+
                 _sections = extend({}, _sections);
                 _sectionCount--;
                 if (_lastSectionId === sectionId) {
@@ -1024,18 +1113,18 @@
             return false;
         },
         disable: function (sectionId: any) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (_sections[sectionId]) {
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 _sections[sectionId].disabled = true;
                 return true;
             }
             return false;
         },
         enable: function (sectionId: any) {
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (_sections[sectionId]) {
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 _sections[sectionId].disabled = false;
                 return true;
             }
@@ -1062,17 +1151,17 @@
                 SpatialNavigation.pause();
             }
             if (!elem) {
-                // @ts-expect-error ts-migrate(2554) FIXME: Expected 1 arguments, but got 0.
+
                 result = focusSection();
             }
             else {
                 if (typeof elem === 'string') {
-                    // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                     if (_sections[elem]) {
                         result = focusSection(elem);
                     }
                     else {
-                        // @ts-expect-error ts-migrate(2554) FIXME: Expected 2 arguments, but got 1.
+
                         result = focusExtendedSelector(elem);
                     }
                 }
@@ -1081,9 +1170,9 @@
                         elem = elem.get(0);
                     }
                     var nextSectionId = getSectionId(elem);
-                    // @ts-expect-error ts-migrate(2554) FIXME: Expected 3 arguments, but got 2.
+
                     if (isNavigable(elem, nextSectionId)) {
-                        // @ts-expect-error ts-migrate(2554) FIXME: Expected 3 arguments, but got 2.
+
                         result = focusElement(elem, nextSectionId);
                     }
                 }
@@ -1097,7 +1186,7 @@
         // move(<direction>, <selector>)
         move: function (direction: any, selector: any) {
             direction = direction.toLowerCase();
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             if (!REVERSE[direction]) {
                 return false;
             }
@@ -1115,8 +1204,8 @@
                 sectionId: sectionId,
                 cause: 'api'
             };
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 4 arguments, but got 3.
-            if (!fireEvent(elem, 'willmove', willmoveProperties)) {
+
+            if (!fireEvent(elem, FiredEvents.willMove, willmoveProperties)) {
                 return false;
             }
             return focusNext(direction, elem, sectionId);
@@ -1136,9 +1225,9 @@
                 });
             };
             if (sectionId) {
-                // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                 if (_sections[sectionId]) {
-                    // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                     doMakeFocusable(_sections[sectionId]);
                 }
                 else {
@@ -1147,7 +1236,7 @@
             }
             else {
                 for (var id in _sections) {
-                    // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                     doMakeFocusable(_sections[id]);
                 }
             }
@@ -1156,7 +1245,7 @@
             if (!sectionId) {
                 _defaultSectionId = '';
             }
-            // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
             else if (!_sections[sectionId]) {
                 throw new Error('Section "' + sectionId + '" doesn\'t exist!');
             }
@@ -1169,9 +1258,9 @@
     /**********************/
     /* CommonJS Interface */
     /**********************/
-    // @ts-expect-error ts-migrate(2580) FIXME: Cannot find name 'module'. Do you need to install ... Remove this comment to see the full error message
+
     if (typeof module === 'object') {
-        // @ts-expect-error ts-migrate(2580) FIXME: Cannot find name 'module'. Do you need to install ... Remove this comment to see the full error message
+
         module.exports = SpatialNavigation;
     }
     /********************/
@@ -1182,13 +1271,13 @@
             SpatialNavigation.init();
             if (arguments.length > 0) {
                 if ($.isPlainObject(arguments[0])) {
-                    // @ts-expect-error ts-migrate(2554) FIXME: Expected 0 arguments, but got 1.
+
                     return SpatialNavigation.add(arguments[0]);
                 }
                 else if ($.type(arguments[0]) === 'string' &&
-                    // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                     $.isFunction(SpatialNavigation[arguments[0]])) {
-                    // @ts-expect-error ts-migrate(7053) FIXME: Element implicitly has an 'any' type because expre... Remove this comment to see the full error message
+
                     return SpatialNavigation[arguments[0]]
                         .apply(SpatialNavigation, [].slice.call(arguments, 1));
                 }
@@ -1210,7 +1299,7 @@
             if (config.id) {
                 SpatialNavigation.remove(config.id);
             }
-            // @ts-expect-error ts-migrate(2554) FIXME: Expected 0 arguments, but got 1.
+
             SpatialNavigation.add(config);
             SpatialNavigation.makeFocusable(config.id);
             return this;
