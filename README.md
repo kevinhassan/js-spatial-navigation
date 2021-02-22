@@ -53,24 +53,6 @@ Examples
 </body>
 ```
 
-### Integrate jQuery
-
-Although SpatialNavigation is a standalone (pure-javascript-based) library, it can work perfectly with jQuery.
-
-```html
-<script src="https://code.jquery.com/jquery-2.2.1.min.js"></script>
-<script>
-  $.getScript('https://luke-chang.github.io/js-spatial-navigation/spatial_navigation.js', function() {
-    $('a, .focusable')
-      .SpatialNavigation()
-      .focus(function() { $(this).css('outline', '2px solid red'); })
-      .blur(function() { $(this).css('outline', ''); })
-      .first()
-      .focus();
-  });
-</script>
-```
-
 ### More Demonstrations
 
 + [Demonstrations](https://luke-chang.github.io/js-spatial-navigation/demo/)
@@ -326,8 +308,6 @@ The type "Selector" can be any of the following types.
 Following custom events are triggered by SpatialNavigation. You can bind them by `addEventListener()`. Some events are marked **"cancelable"**, which means you can cancel them by `Event.preventDefault()`, as usual.
 
 Focus-related events are also wrappers of the native `focus`/`blur` events, so they are triggered as well even SpatialNavigation is not involved. In this case, some properties in `event.detail` may be omitted. This kind of properties is marked **"Navigation Only"** below.
-
-**Note:** If you bind events via jQuery's [`.on()`](http://api.jquery.com/on/) API, you must change to `event.originalEvent.detail` to access the `detail` objects.
 
 #### `sn:willmove`
 
